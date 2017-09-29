@@ -15,9 +15,12 @@ open SharpDX.Mathematics.Interop
 open System
 
 let createSwapChain factory device handle = 
-    let modeDesc = ModeDescription(600,600,Rational(60,1),Format.R8G8B8A8_UNorm)
-    let mutable swapChainDesc = SwapChainDescription(BufferCount = 1,ModeDescription = modeDesc, IsWindowed = RawBool(true))
+    let mutable swapChainDesc = SwapChainDescription()
+    swapChainDesc.BufferCount <- 1
+    swapChainDesc.ModeDescription <- ModeDescription(600,600,Rational(60,1),Format.R8G8B8A8_UNorm)
+    swapChainDesc.IsWindowed <- RawBool(true)
     swapChainDesc.SampleDescription <- SampleDescription(1,0)
+    swapChainDesc.SwapEffect <- SwapEffect.Discard
     swapChainDesc.OutputHandle <- handle
     swapChainDesc.Usage <- Usage.RenderTargetOutput
     let swapChain = new SwapChain(factory,device,swapChainDesc)
@@ -28,29 +31,11 @@ let getRenderView device (swapChain:SwapChain) =
     let renderView = new RenderTargetView(device,backBuffer)
     renderView
 
-let createVertexBuf (device:Direct3D11.Device) =
-    let data = [| 0.0f; 0.0f; 0.0f; 100.f; 0.0f; 0.0f; 0.0f; 100.0f; 0.0f |]
-    let mutable bufferDesc = Direct3D11.BufferDescription()
-    bufferDesc.BindFlags <- Direct3D11.BindFlags.VertexBuffer
-    bufferDesc.CpuAccessFlags <- Direct3D11.CpuAccessFlags.None
-    bufferDesc.OptionFlags <-  Direct3D11.ResourceOptionFlags.None
-    bufferDesc.SizeInBytes <- data.Length * sizeof<float32>
-    let buffer = Direct3D11.Buffer.Create<float32>(device,data,bufferDesc)
-    buffer
-
-let createVertexSRV (device:Direct3D11.Device) vertexBuf = 
-    let mutable vdesc: Direct3D11.ShaderResourceViewDescription = ShaderResourceViewDescription()
-    vdesc.Dimension <- ShaderResourceViewDimension.Buffer
-    vdesc.Format <- DXGI.Format.R32_Float
-    let srv = new ShaderResourceView(device,vertexBuf,vdesc)
-    srv
-
-let createShader (shader:string) (profile:string) =
-    let result = ShaderBytecode.Compile(shader,profile,ShaderFlags.None,EffectFlags.None)
+let createShader (shader:string) (profile:string) (entryPoint:string) =
+    let result = ShaderBytecode.Compile(shader,entryPoint,profile)
     if result.HasErrors then
         printfn "%s" result.Message
     result.Bytecode
-
 
 type MyRender(vshaderBC: ShaderBytecode, fshaderBC: ShaderBytecode) =
     let renderForm = new RenderForm()
@@ -60,21 +45,25 @@ type MyRender(vshaderBC: ShaderBytecode, fshaderBC: ShaderBytecode) =
     let swapChain = createSwapChain factory device renderForm.Handle
     let deviceCon = device.ImmediateContext
     let renderView = getRenderView device swapChain
-    let color = RawColor4(1.0f, 0.0f, 0.0f, 0.0f)
-    let vertexBuf = createVertexBuf device
+    let color = RawColor4(0.0f, 0.0f, 0.0f, 0.0f)
+    let vertexData =  [| 0.0f; 0.5f; 0.5f; 0.5f; -0.5f; 0.5f; -0.5f; -0.5f; 0.5f |]
+    let vertexBuf = Direct3D11.Buffer.Create<float32>(device,Direct3D11.BindFlags.VertexBuffer,vertexData)
     let vshader = new Direct3D11.VertexShader(device,vshaderBC.Data)
     let fshader = new Direct3D11.PixelShader(device,fshaderBC.Data)
-    let vshaderView = createVertexSRV device vertexBuf
-    let elements = Array.create 10 (Direct3D11.InputElement())
+    let vbufBinding = VertexBufferBinding(vertexBuf,12,0)
+    let elements = [| InputElement("position",0,DXGI.Format.R32G32B32_Float,0) |]
     let inputLayout = new Direct3D11.InputLayout(device,vshaderBC.Data,elements)
     let drawScene () = 
         deviceCon.ClearRenderTargetView(renderView,color)
         deviceCon.InputAssembler.InputLayout <- inputLayout
+        deviceCon.InputAssembler.SetVertexBuffers(0,vbufBinding)
+        deviceCon.InputAssembler.PrimitiveTopology <- PrimitiveTopology.TriangleList
+        deviceCon.Rasterizer.SetViewport(0.0f,0.0f,float32(renderForm.Height),float32(renderForm.Width))
         deviceCon.VertexShader.Set(vshader)
         deviceCon.PixelShader.Set(fshader)
-        deviceCon.VertexShader.SetShaderResource(0,vshaderView)
+        deviceCon.OutputMerger.SetTargets(renderView)
         deviceCon.Draw(3,0)
-        swapChain.Present(1,PresentFlags.None) |> ignore
+        swapChain.Present(0,PresentFlags.None) |> ignore
     member this.Form = renderForm
     member this.RenderCallback = drawScene
     //member this.RenderCallback = new RenderLoop.RenderCallback(drawScene)
@@ -90,14 +79,15 @@ type MyRender(vshaderBC: ShaderBytecode, fshaderBC: ShaderBytecode) =
             renderForm.Dispose()
 
 [<EntryPoint>]
-let main argv = 
-    //currently reading shader from file, will be replaced with hardcoded shader in this file
-    let vshaderFname = argv.[0]
-    let fshaderFname = argv.[1]
-    let vshaderText = System.IO.File.ReadAllText(vshaderFname)
-    let fshaderText = System.IO.File.ReadAllText(fshaderFname)
-    use vshaderBC = createShader vshaderText "vs_5_0"
-    use fshaderBC = createShader fshaderText "ps_5_0"
+let main argv =
+    let vshaderText = "void VS(float3 pos:POSITION,  out float4 opos: SV_POSITION){\n 
+      opos = float4(pos,1.0);\n
+    }"
+    let fshaderText = "float4 PS(float4 opos: SV_POSITION): SV_TARGET{\n
+     return float4(0.0,1,0,1);
+    }"
+    use vshaderBC = createShader vshaderText "vs_5_0" "VS"
+    use fshaderBC = createShader fshaderText "ps_5_0" "PS"
     use renderer = new MyRender(vshaderBC,fshaderBC)
     RenderLoop.Run(renderer.Form,renderer.RenderCallback)
     0
