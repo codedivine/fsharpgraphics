@@ -1,5 +1,5 @@
 ﻿(* 
-Copyright 2017 Rahul Garg
+Copyright 2017-2019 Rahul Garg
 This file is part of fsharpgraphics project. 
 It is subject to the license terms in the LICENSE file found in the top-level directory of the project. 
 No part of fsharpgraphics project, including this file, may be copied, modified, propagated, or distributed except according to the terms contained in the LICENSE file.
@@ -49,7 +49,7 @@ type MyRender(vshaderBC: ShaderBytecode, fshaderBC: ShaderBytecode) =
     let vertexData =  [| 0.0f; 0.5f; 0.5f; 0.5f; -0.5f; 0.5f; -0.5f; -0.5f; 0.5f |]
     let vertexBuf = Direct3D11.Buffer.Create<float32>(device,Direct3D11.BindFlags.VertexBuffer,vertexData)
     let vshader = new Direct3D11.VertexShader(device,vshaderBC.Data)
-    let fshader = new Direct3D11.PixelShader(device,fshaderBC.Data)
+    let pshader = new Direct3D11.PixelShader(device,fshaderBC.Data)
     let vbufBinding = VertexBufferBinding(vertexBuf,12,0)
     let elements = [| InputElement("position",0,DXGI.Format.R32G32B32_Float,0) |]
     let inputLayout = new Direct3D11.InputLayout(device,vshaderBC.Data,elements)
@@ -60,7 +60,7 @@ type MyRender(vshaderBC: ShaderBytecode, fshaderBC: ShaderBytecode) =
         deviceCon.InputAssembler.PrimitiveTopology <- PrimitiveTopology.TriangleList
         deviceCon.Rasterizer.SetViewport(0.0f,0.0f,float32(renderForm.Height),float32(renderForm.Width))
         deviceCon.VertexShader.Set(vshader)
-        deviceCon.PixelShader.Set(fshader)
+        deviceCon.PixelShader.Set(pshader)
         deviceCon.OutputMerger.SetTargets(renderView)
         deviceCon.Draw(3,0)
         swapChain.Present(0,PresentFlags.None) |> ignore
@@ -71,7 +71,7 @@ type MyRender(vshaderBC: ShaderBytecode, fshaderBC: ShaderBytecode) =
         member this.Dispose() =
             vertexBuf.Dispose()
             vshader.Dispose()
-            fshader.Dispose()
+            pshader.Dispose()
             swapChain.Dispose()
             device.Dispose()
             adapter.Dispose()
@@ -83,12 +83,12 @@ let main argv =
     let vshaderText = "void VS(float3 pos:POSITION,  out float4 opos: SV_POSITION){\n 
       opos = float4(pos,1.0);\n
     }"
-    let fshaderText = "float4 PS(float4 opos: SV_POSITION): SV_TARGET{\n
+    let pshaderText = "float4 PS(float4 opos: SV_POSITION): SV_TARGET{\n
      return float4(0.0,1,0,1);
     }"
     use vshaderBC = createShader vshaderText "vs_5_0" "VS"
-    use fshaderBC = createShader fshaderText "ps_5_0" "PS"
-    use renderer = new MyRender(vshaderBC,fshaderBC)
+    use pshaderBC = createShader pshaderText "ps_5_0" "PS"
+    use renderer = new MyRender(vshaderBC,pshaderBC)
     RenderLoop.Run(renderer.Form,renderer.RenderCallback)
     0
 
