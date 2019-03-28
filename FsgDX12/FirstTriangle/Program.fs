@@ -12,12 +12,10 @@ open SharpDX
 open SharpDX.Direct3D
 open SharpDX.Direct3D12
 open SharpDX.DXGI
-open SharpDX.Desktop
 open SharpDX.Windows
-open System.Drawing
 open SharpDX.Mathematics.Interop
+open SharpDX.D3DCompiler
 open System
-open SharpDX.Direct3D
 
 type FsgVertexResource(size:int,stride:int,device:Direct3D12.Device) =  
     let vertexBufferDesc = ResourceDescription.Buffer(int64 size)
@@ -35,12 +33,34 @@ type FsgVertexResource(size:int,stride:int,device:Direct3D12.Device) =
         let ptr = vertexBuffer.Map(0)
         Utilities.Write(ptr,data,0,data.Length) |> ignore
         vertexBuffer.Unmap(0)
-    member this.GetView() = vertexBufferView
+    member this.View = vertexBufferView
     interface IDisposable with
         member this.Dispose() =
             vertexBuffer.Dispose()
 
-type DeviceWithAdapterIndex = {device:Direct3D12.Device ;  adapterIndex:int}
+ type FsgRenderResources(device:Direct3D12.Device, adapterIndex:int, numBuffers:int, swapChain:SwapChain) = 
+    let rtvHeapDesc = new DescriptorHeapDescription(
+                            DescriptorCount = numBuffers,
+                            Flags = DescriptorHeapFlags.None,
+                            NodeMask = adapterIndex,
+                            Type = DescriptorHeapType.RenderTargetView
+                        )
+    let rtvHeap = device.CreateDescriptorHeap rtvHeapDesc
+    let rtvDescSize = device.GetDescriptorHandleIncrementSize(DescriptorHeapType.RenderTargetView)
+    let rtvStart = rtvHeap.CPUDescriptorHandleForHeapStart
+    let renderTargets = Array.init numBuffers (fun i -> 
+            let target = swapChain.GetBackBuffer<SharpDX.Direct3D12.Resource>(i)
+            let rtvHandle = rtvStart + i*rtvDescSize
+            device.CreateRenderTargetView(target,System.Nullable(),rtvHandle)
+            target
+    )
+    interface IDisposable with 
+        member this.Dispose() = 
+            for target in renderTargets do
+                target.Dispose()
+            rtvHeap.Dispose()
+
+
 
 let createSwapChain factory queue numBuffers mode isWindowed handle = 
     let mutable swapChainDesc = new SwapChainDescription()
@@ -53,25 +73,34 @@ let createSwapChain factory queue numBuffers mode isWindowed handle =
     swapChainDesc.OutputHandle <- handle
     new SwapChain(factory,queue,swapChainDesc)
 
-let createRtvHeap (device:Direct3D12.Device) adapterIndex numBuffers = 
-     let rtvHeapDesc = new DescriptorHeapDescription(
-                            DescriptorCount = numBuffers,
-                            Flags = DescriptorHeapFlags.None,
-                            NodeMask = adapterIndex,
-                            Type = DescriptorHeapType.RenderTargetView
-                        )
-     device.CreateDescriptorHeap(rtvHeapDesc)
+let createPSO vertexShader pixelShader rootSig inputLayout (device:Direct3D12.Device) = 
+    let mutable psoDesc = new GraphicsPipelineStateDescription()
+    psoDesc.Flags <- PipelineStateFlags.None
+    psoDesc.DepthStencilState <- new DepthStencilStateDescription(
+                                    IsDepthEnabled = new RawBool(false),
+                                    IsStencilEnabled = new RawBool(false)
+                                    )
+    psoDesc.RootSignature <- rootSig
+    psoDesc.InputLayout <- inputLayout
+    psoDesc.VertexShader <- vertexShader
+    psoDesc.PixelShader <- pixelShader
+    psoDesc.PrimitiveTopologyType <- PrimitiveTopologyType.Triangle
+    psoDesc.SampleMask <- Int32.MaxValue
+    psoDesc.SampleDescription <- new SharpDX.DXGI.SampleDescription(1,0)
+    psoDesc.StreamOutput <- new StreamOutputDescription()
+    psoDesc.BlendState <- BlendStateDescription.Default()
+    psoDesc.RasterizerState <- RasterizerStateDescription.Default()
+    psoDesc.RenderTargetCount <- 1
+    psoDesc.RenderTargetFormats.[0] <- SharpDX.DXGI.Format.R8G8B8A8_UNorm
+    device.CreateGraphicsPipelineState(psoDesc)
 
-let createRenderTargets (device:Direct3D12.Device) numBuffers (swapChain:SwapChain) (rtvHeap:DescriptorHeap) = 
-    let rtvDescSize = device.GetDescriptorHandleIncrementSize(DescriptorHeapType.RenderTargetView)
-    let rtvStart = rtvHeap.CPUDescriptorHandleForHeapStart
-    let renderTargets = Array.init numBuffers (fun i -> 
-            let target = swapChain.GetBackBuffer<SharpDX.Direct3D12.Resource>(i)
-            let rtvHandle = rtvStart + i*rtvDescSize
-            device.CreateRenderTargetView(target,System.Nullable(),rtvHandle)
-            target
-    )
-    renderTargets
+
+let createShaderFromFile fname entryPoint profile (flags:ShaderFlags) =  
+    let byteCode:D3DCompiler.ShaderBytecode = D3DCompiler.ShaderBytecode.CompileFromFile(fname,entryPoint,profile,flags) 
+                                            |> CompilationResult.op_Implicit
+    let shaderD3D12 = new Direct3D12.ShaderBytecode(byteCode.Data)
+    shaderD3D12
+
    
 [<EntryPoint>]
 let main argv =
@@ -84,11 +113,20 @@ let main argv =
     let queue = device.CreateCommandQueue(CommandListType.Direct)
     let mode =  new ModeDescription(1024,768,new Rational(60,1),DXGI.Format.R8G8B8A8_UNorm)
     use swapChain = createSwapChain factory queue numBuffers mode true form.Handle
-    use rtvHeap = createRtvHeap device adapterIndex numBuffers
-    let renderTargets = createRenderTargets device numBuffers swapChain rtvHeap
+    use renderTargetResource = new FsgRenderResources(device,adapterIndex,numBuffers,swapChain)
     let rootSigDesc = new RootSignatureDescription(RootSignatureFlags.AllowInputAssemblerInputLayout)
-    let rootSigBlob = rootSigDesc.Serialize()
-    let dataPtr = Blob.op_Implicit(rootSigBlob)
-    let rootSig = device.CreateRootSignature(dataPtr)
+    let rootSigDataPtr:DataPointer = rootSigDesc.Serialize() |> Blob.op_Implicit
+    use rootSig = device.CreateRootSignature(rootSigDataPtr)
+
+    //For each vertex, we store a 3D position and a color (RGBA)
+    let inputElems = [| new InputElement("POSITION", 0, Format.R32G32B32_Float, 0, 0);
+                        new InputElement("COLOR", 0, Format.R32G32B32A32_Float, 12, 0)|]
+    
+    let shaderFlags = ShaderFlags.Debug
+    let VS = createShaderFromFile "shaders.hlsl" "VSMain" "vs_5_0" shaderFlags
+    let PS = createShaderFromFile "shaders.hlsl" "PSMain" "ps_5_0" shaderFlags
+    let inputLayout = new InputLayoutDescription(inputElems)
+    let pso = createPSO VS PS rootSig inputLayout device
+    use fence = device.CreateFence((int64)0,FenceFlags.None)
     form.Show()
     0 // return an integer exit code
